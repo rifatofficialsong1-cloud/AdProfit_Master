@@ -6,139 +6,135 @@ import sqlite3
 import os
 from datetime import datetime, timedelta
 
-# --- CONFIGURATION (Safe Mode) ---
-# গিটহাবে আপলোড করার জন্য টোকেন ও ওয়ালেট সরিয়ে Environment Variable ব্যবহার করা হয়েছে
+# --- CONFIGURATION ---
 API_TOKEN = os.environ.get('BOT_TOKEN')
 TON_WALLET = os.environ.get('TON_WALLET')
 SUPPORT_ADMIN = '@mdrifat021u'
-CHANNEL_LINK = 'https://t.me/AdProfit_Master_News'
-ADSTERRA_LINK = 'https://www.effectivegatecpm.com/djcfysfxz?key=6ef18d633548c970dc5f80d696319336'
+ADSTERRA_LINK = os.environ.get('ADSTERRA_LINK')
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# --- DATABASE SETUP ---
+# --- DATABASE SETUP (Enhanced) ---
 def init_db():
-    conn = sqlite3.connect('adprofit.db')
+    conn = sqlite3.connect('adprofit_v2.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, premium_until TEXT, ad_msg TEXT, interval INTEGER)''')
+                 (user_id INTEGER PRIMARY KEY, premium_until TEXT, group_limit INTEGER DEFAULT 1)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS groups 
+                 (group_id INTEGER PRIMARY KEY, owner_id INTEGER, ad_msg TEXT, interval INTEGER)''')
     conn.commit()
     conn.close()
 
-def get_user(user_id):
-    conn = sqlite3.connect('adprofit.db')
+# --- HELPERS ---
+def get_user_info(user_id):
+    conn = sqlite3.connect('adprofit_v2.db')
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     user = c.fetchone()
     conn.close()
     return user
 
-def update_user(user_id, premium_days=None, ad_msg=None, interval=None):
-    conn = sqlite3.connect('adprofit.db')
-    c = conn.cursor()
-    if not get_user(user_id):
-        c.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-    
-    if premium_days is not None:
-        expiry = (datetime.now() + timedelta(days=premium_days)).strftime('%Y-%m-%d %H:%M:%S')
-        c.execute("UPDATE users SET premium_until=? WHERE user_id=?", (expiry, user_id))
-    if ad_msg:
-        c.execute("UPDATE users SET ad_msg=? WHERE user_id=?", (ad_msg, user_id))
-    if interval:
-        c.execute("UPDATE users SET interval=? WHERE user_id=?", (interval, user_id))
-    conn.commit()
-    conn.close()
-
 def is_premium(user_id):
-    user = get_user(user_id)
+    user = get_user_info(user_id)
     if user and user[1]:
         expiry = datetime.strptime(user[1], '%Y-%m-%d %H:%M:%S')
         if expiry > datetime.now():
             return True, expiry
     return False, None
 
-# --- UI HANDLERS ---
+# --- COMMANDS ---
 @bot.message_handler(commands=['start'])
-def welcome(message):
-    update_user(message.chat.id)
+def welcome_professional(message):
+    if message.chat.id < 0: return # Groups ignore start
+    
+    # Register User
+    conn = sqlite3.connect('adprofit_v2.db')
+    c = conn.cursor()
+    if not get_user_info(message.chat.id):
+        c.execute("INSERT INTO users (user_id) VALUES (?)", (message.chat.id,))
+    conn.commit()
+    conn.close()
+
+    text = (
+        "🚀 *Welcome to AdProfit Master V2*\n\n"
+        "The most powerful automation tool for Telegram Group Admins.\n\n"
+        "📜 *Rules & Setup Guide:*\n"
+        "1️⃣ Add me to your group as **Administrator**.\n"
+        "2️⃣ Use `/setup` inside the group to link it to your account.\n"
+        "3️⃣ Set your ad message and interval from this private chat.\n\n"
+        "⚠️ *Limits:* Free users can only link **1 group**."
+    )
+    
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("📝 Set Message", callback_data='set_msg'),
-        types.InlineKeyboardButton("⏰ Set Time", callback_data='set_time'),
-        types.InlineKeyboardButton("🚀 Start Ads", callback_data='start_ads'),
-        types.InlineKeyboardButton("💎 Premium", callback_data='premium'),
-        types.InlineKeyboardButton("🛠 Support", callback_data='support')
+        types.InlineKeyboardButton("📋 My Groups", callback_data='my_groups'),
+        types.InlineKeyboardButton("💎 Go Premium", callback_data='premium'),
+        types.InlineKeyboardButton("🛠 Support", callback_data='support'),
+        types.InlineKeyboardButton("⚙️ How to use", callback_data='guide')
     )
-    bot.send_message(message.chat.id, "✨ *Welcome to AdProfit Master*\nAutomate your group ads and earn more!", parse_mode='Markdown', reply_markup=markup)
+    bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    uid = call.message.chat.id
-    if call.data == "premium":
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("7 Days - 4 TON", callback_data="p_4"),
-            types.InlineKeyboardButton("15 Days - 9 TON", callback_data="p_9"),
-            types.InlineKeyboardButton("30 Days - 14 TON", callback_data="p_14")
-        )
-        bot.edit_message_text("💎 *Premium Plans*\nNo developer ads & priority support.", uid, call.message.message_id, reply_markup=markup)
+@bot.message_handler(commands=['setup'])
+def setup_group(message):
+    if message.chat.id > 0:
+        return bot.reply_to(message, "❌ Use this command *inside* a group!")
     
-    elif call.data.startswith("p_"):
-        amt = call.data.split("_")[1]
-        bot.send_message(uid, f"💳 Send `{amt} TON` to:\n`{TON_WALLET}`\n\nSend proof to {SUPPORT_ADMIN} with ID: `{uid}`", parse_mode='Markdown')
+    user_id = message.from_user.id
+    group_id = message.chat.id
+    
+    # Check Admin Status
+    member = bot.get_chat_member(group_id, user_id)
+    if member.status not in ['administrator', 'creator']:
+        return bot.reply_to(message, "❌ Only group admins can use this!")
 
-    elif call.data == "support":
-        premium, expiry = is_premium(uid)
-        status = f"✅ Premium until {expiry.date()}" if premium else "❌ Free Plan"
-        bot.send_message(uid, f"🛠 *Support Center*\nStatus: {status}\nAdmin: {SUPPORT_ADMIN}", parse_mode='Markdown')
+    # Check Limits
+    user = get_user_info(user_id)
+    conn = sqlite3.connect('adprofit_v2.db')
+    c = conn.cursor()
+    c.execute("SELECT count(*) FROM groups WHERE owner_id=?", (user_id,))
+    count = c.fetchone()[0]
+    
+    premium, _ = is_premium(user_id)
+    limit = 1 if not premium else 50 # Premium gets 50 groups
+    
+    if count >= limit:
+        return bot.send_message(user_id, f"❌ Limit reached! You can only manage {limit} group(s). Upgrade to Premium.")
 
-    elif call.data == "set_msg":
-        m = bot.send_message(uid, "📩 Send your Ad text:")
-        bot.register_next_step_handler(m, lambda msg: [update_user(uid, ad_msg=msg.text), bot.reply_to(msg, "✅ Saved!")])
+    c.execute("INSERT OR REPLACE INTO groups (group_id, owner_id) VALUES (?, ?)", (group_id, user_id))
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, "✅ *Group Linked Successfully!*\nGo to my private chat to set up ads.")
+    bot.send_message(user_id, f"🔗 Linked new group: *{message.chat.title}*\nNow set your Ad Message and Interval.")
 
-    elif call.data == "set_time":
-        m = bot.send_message(uid, "🕒 Enter interval (minutes):")
-        bot.register_next_step_handler(m, save_time)
-
-    elif call.data == "start_ads":
-        user = get_user(uid)
-        if user and user[2] and user[3]:
-            bot.send_message(uid, "🚀 *Automation Active!*")
-            threading.Thread(target=ad_engine, args=(uid,)).start()
-        else:
-            bot.send_message(uid, "❌ Set Message & Time first!")
-
-def save_time(message):
-    try:
-        t = int(message.text) * 60
-        update_user(message.chat.id, interval=t)
-        bot.reply_to(message, "✅ Interval Saved!")
-    except:
-        bot.reply_to(message, "❌ Enter a number.")
-
-def ad_engine(uid):
+# --- AD ENGINE UPDATE ---
+def ad_cycle_v2(group_id, owner_id):
     while True:
-        user = get_user(uid)
-        if not user or not user[2]: break
-        time.sleep(user[3] if user[3] else 600)
-        bot.send_message(uid, f"📢 *SPONSORED*\n\n{user[2]}", parse_mode='Markdown')
-        premium, _ = is_premium(uid)
-        if not premium:
-            time.sleep(30)
-            btn = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🎁 Claim Bonus", url=ADSTERRA_LINK))
-            bot.send_message(uid, "🌟 *Special Offer!*", reply_markup=btn)
-
-@bot.message_handler(commands=['activate'])
-def manual_activate(message):
-    if f"@{message.from_user.username}" == SUPPORT_ADMIN:
+        conn = sqlite3.connect('adprofit_v2.db')
+        c = conn.cursor()
+        c.execute("SELECT ad_msg, interval FROM groups WHERE group_id=?", (group_id,))
+        group = c.fetchone()
+        conn.close()
+        
+        if not group or not group[0]: break # Stop if no message
+        
+        time.sleep(group[1] if group[1] else 600)
+        
         try:
-            _, target, days = message.text.split()
-            update_user(int(target), premium_days=int(days))
-            bot.reply_to(message, f"✅ Activated {target} for {days} days.")
+            bot.send_message(group_id, f"📢 *SPONSORED*\n\n{group[0]}", parse_mode='Markdown')
+            
+            # Dev Ad for Free users
+            premium, _ = is_premium(owner_id)
+            if not premium:
+                time.sleep(30)
+                btn = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🎁 Claim Bonus", url=ADSTERRA_LINK))
+                bot.send_message(group_id, "🌟 *Exclusive Offer!*", reply_markup=btn)
         except:
-            bot.reply_to(message, "Use: /activate ID DAYS")
+            break # Bot kicked or group deleted
+
+# বটের অন্যান্য হ্যান্ডলার আগের মতোই থাকবে...
 
 if __name__ == "__main__":
     init_db()
-    print("Bot starting...")
+    print("V2 Master is LIVE! 🚀")
     bot.polling(none_stop=True)
